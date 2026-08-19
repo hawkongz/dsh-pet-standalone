@@ -1,0 +1,11 @@
+# Rust 构建产物
+/target/
+
+# libvpx 静态库（构建脚本会克隆源码重建，勿提交）
+/vendor_libvpx/
+
+# MSYS 工具（构建 libvpx 用，勿提交）
+/tools_msys/
+
+# 运行时/构建日志
+*.log
