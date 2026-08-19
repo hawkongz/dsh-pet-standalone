@@ -33,13 +33,12 @@ GUI 全部用 Win32 原生 API（`CreateWindowExW` / `UpdateLayeredWindow` / `Sh
 ## 快速开始
 
 ```sh
-# 1. 准备素材：从上游 dsh-pet 仓库获取 51 个 webm，放 assets/videos/
-#    （GitHub: PC2005-cloud/dsh-pet → dsh-pet/assets/thumb/*.webm）
+# 素材（assets/videos/，51 个 webm）已包含在本仓库，无需手动获取。
 
-# 2. 首次构建需编译 libvpx 静态库（见下），之后：
+# 首次构建需先编译 libvpx 静态库（见下），之后：
 cargo build --release
 
-# 3. 运行
+# 运行
 target/release/dsh-pet.exe
 ```
 
