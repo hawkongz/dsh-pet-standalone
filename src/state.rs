@@ -22,7 +22,7 @@ pub const MOVE_LEAD_SEC: f64 = 2.0;
 pub const MOVE_TAIL_SEC: f64 = 2.0;
 
 pub const DRAG_THRESHOLD: f64 = 5.0;
-pub const DEFAULT_SCALE: f64 = 0.72;
+pub const DEFAULT_SCALE: f64 = 0.5; // 默认最小尺寸：高分屏下 640×360 源分辨率 1:1 输出最清晰
 pub const CORNER_MARGIN: f64 = 24.0;
 pub const SCALE_STEPS: [f64; 4] = [0.5, 0.72, 0.85, 1.0];
 
