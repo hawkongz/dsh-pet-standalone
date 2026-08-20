@@ -19,14 +19,16 @@ GUI 全部用 Win32 原生 API（`CreateWindowExW` / `UpdateLayeredWindow` / `Sh
 
 ## 特性
 
+- **多角色**：内置 shenshen 形象 + 支持外部扩展角色目录（exe 同目录或 `%APPDATA%/dsh-pet-standalone/characters/` 放 `<角色id>/videos/*.webm` 即可），右键/托盘菜单可随时切换角色
+- **动态动画分类**：按 `videos/` 子目录（`idle/turn/move/click/drag/random`）、`manifest.json`、文件名关键词自动分类；待机/转向支持多视频二级菜单
 - **多桌宠**：右键菜单「生成新桌宠」可创建多只，每只独立动画链/位置/朝向/大小/置顶；「删除此桌宠」移除当前，配置 `pets` 数组自动持久化，启动时全部恢复
 - **动画链**：30% 待机 / 10% 转向 / 40% 随机动作 / 20% 移动，永不停止
 - **透明窗口**：`UpdateLayeredWindow` 逐像素 alpha 合成，半透明边缘保留
 - **鼠标穿透**：`WM_NCHITTEST` 按像素 alpha（<128 穿透），等效原版命中层
 - **点击回应**：待机时点击随机播 3 种回应动画
 - **拖拽**：`SetCapture` 捕获鼠标 + 全局坐标跟手，快速拖拽不丢事件
-- **右键菜单**：播放任意动画 / 回到右下角 / 置顶 / 不移动 / 开机自启 / 4 档大小 / 生成新桌宠 / 删除此桌宠
-- **系统托盘**：显示/隐藏全部、生成新桌宠、开机自启、退出
+- **右键菜单**：播放任意动画 / 切换角色 / 回到右下角 / 置顶 / 不移动 / 开机自启 / 4 档大小 / 生成新桌宠 / 删除此桌宠
+- **系统托盘**：显示/隐藏全部、切换角色、生成新桌宠、开机自启、退出
 - **开机自启**：HKCU\...\Run 注册表键（无需管理员）
 - **VP9 alpha 解码**：静态链接 libvpx，主色 + BlockAdditional alpha 双路解码合成 RGBA
 
@@ -59,8 +61,10 @@ build_libvpx.cmd   rem configure（禁用 vp8/encoder，仅 VP9 解码器）
 ├── src/
 │   ├── main.rs         # 入口 + 托盘图标生成
 │   ├── win32.rs        # 纯 Win32 窗口（透明 + 穿透 + 渲染 + 消息循环）
-│   ├── app.rs          # 应用逻辑（状态机 + 交互 + 菜单）
-│   ├── state.rs        # 动画目录 + 动画链概率
+│   ├── app.rs          # 应用逻辑（多宠物 + 角色切换 + 菜单分发）
+│   ├── pet.rs          # 单只桌宠（状态机 + 交互 + 菜单）
+│   ├── role.rs         # 多角色目录 + 素材加载（内置/外部）
+│   ├── state.rs        # 动画常量 + 动态分类 + 动画链
 │   ├── clip.rs         # 解码管线（VP9 主色 + alpha → BGRA 合成）
 │   ├── webm.rs         # WebM/EBML 解析（BlockAdditions alpha）
 │   ├── vpx.rs          # libvpx FFI 绑定（静态链接 vpxmd.lib）
@@ -73,6 +77,16 @@ build_libvpx.cmd   rem configure（禁用 vp8/encoder，仅 VP9 解码器）
 ├── tools_msys/         # MSYS2 make（libvpx 构建）
 ├── vendor_libvpx/      # libvpx 源码 + vpxmd.lib
 └── build_libvpx.cmd    # libvpx 构建脚本
+```
+
+## 外部角色扩展
+
+在 exe 同目录或 `%APPDATA%/dsh-pet-standalone/` 下建 `characters/<角色id>/videos/`，
+放入该角色的 webm 动画（`videos/` 下可按 `idle/turn/move/click/drag/random` 子目录分类），
+重启或右键「切换角色」即可使用。也可在角色目录放 `manifest.json` 精确指定分类：
+
+```json
+{ "idle": "待机.webm", "turn": "转身.webm", "moves": ["走路.webm"], "clicks": ["点头.webm"], "drag": "拖拽.webm" }
 ```
 
 ## 素材解码管线

@@ -8,6 +8,7 @@ mod clip;
 mod config;
 mod monitor;
 mod pet;
+mod role;
 mod state;
 mod tray;
 mod vpx;

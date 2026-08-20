@@ -23,6 +23,8 @@ mod win32;
 mod tray;
 #[path = "../pet.rs"]
 mod pet;
+#[path = "../role.rs"]
+mod role;
 #[path = "../app.rs"]
 mod app;
 

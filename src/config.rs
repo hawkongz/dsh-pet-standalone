@@ -37,6 +37,7 @@ impl Default for PetConfig {
 pub struct Config {
     pub dir: PathBuf,
     pub pets: Vec<PetConfig>,
+    pub character: String,
 }
 
 impl Config {
@@ -49,6 +50,7 @@ impl Config {
         let mut cfg = Config {
             dir,
             pets: vec![PetConfig::default()],
+            character: crate::state::DEFAULT_CHARACTER.to_string(),
         };
         if let Ok(text) = fs::read_to_string(&path) {
             cfg.parse(&text);
@@ -84,6 +86,12 @@ impl Config {
                 }
                 if key == "pets" {
                     self.parse_pets(bytes, &mut i, n);
+                } else if key == "character" {
+                    let (val, next) = read_value(bytes, i, n);
+                    i = next;
+                    if !val.trim().is_empty() {
+                        self.character = val.trim().to_string();
+                    }
                 } else {
                     skip_value(bytes, &mut i, n);
                 }
@@ -125,7 +133,9 @@ impl Config {
 
     pub fn save(&self) {
         let _ = fs::create_dir_all(&self.dir);
-        let mut s = String::from("{\n  \"version\": 2,\n  \"pets\": [\n");
+        let mut s = String::from("{\n  \"version\": 2,\n  \"character\": \"");
+        s.push_str(&self.character);
+        s.push_str("\",\n  \"pets\": [\n");
         for (idx, p) in self.pets.iter().enumerate() {
             s.push_str(&format!(
                 "    {{\"rx\": {}, \"ry\": {}, \"facing\": \"{}\", \"scale\": {}, \"on_top\": {}, \"no_move\": {}}}",

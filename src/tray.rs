@@ -5,7 +5,7 @@ use windows_sys::Win32::{
         NOTIFYICONDATAW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
         NIM_MODIFY, NOTIFYICON_VERSION, NOTIFYICON_VERSION_4,
     },
-    UI::WindowsAndMessaging::{CreatePopupMenu, AppendMenuW, DestroyMenu, TrackPopupMenu, MF_STRING, MF_SEPARATOR, WM_LBUTTONDBLCLK, WM_RBUTTONUP, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_RETURNCMD},
+    UI::WindowsAndMessaging::{CreatePopupMenu, AppendMenuW, DestroyMenu, TrackPopupMenu, MF_STRING, MF_SEPARATOR, MF_CHECKED, MF_POPUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_RETURNCMD},
 };
 
 use crate::app::App;
@@ -68,6 +68,25 @@ pub fn show_menu(app: &mut App) {
         AppendMenuW(menu, MF_STRING, 1001, wide("显示/隐藏"));
         AppendMenuW(menu, MF_STRING, 1002, wide("开机自启"));
         AppendMenuW(menu, MF_STRING, 1003, wide("生成新桌宠"));
+    }
+    // 切换角色子菜单
+    let chars = crate::role::list_characters();
+    if chars.len() > 1 {
+        let sub_role = unsafe { CreatePopupMenu() };
+        for (i, cid) in chars.iter().enumerate() {
+            let checked = app.current_character == *cid;
+            unsafe {
+                AppendMenuW(
+                    sub_role,
+                    if checked { MF_STRING | MF_CHECKED } else { MF_STRING },
+                    1100 + i,
+                    wide(cid),
+                )
+            };
+        }
+        unsafe { AppendMenuW(menu, MF_STRING | MF_POPUP, sub_role as usize, wide("切换角色")) };
+    }
+    unsafe {
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, 1004, wide("退出"));
     }
@@ -94,7 +113,14 @@ pub fn show_menu(app: &mut App) {
         }
         1003 => app.spawn_pet(),
         1004 => app.quit_all(),
-        _ => {}
+        _ => {
+            if cmd >= 1100 && cmd < 1100 + 100 {
+                let i = (cmd - 1100) as usize;
+                if let Some(cid) = chars.get(i) {
+                    app.switch_character(cid);
+                }
+            }
+        }
     }
 }
 

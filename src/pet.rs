@@ -19,23 +19,24 @@ use windows_sys::Win32::{
 
 use crate::clip::{ClipDecoder, W, H};
 use crate::config::PetConfig;
-use crate::state::{self, Catalog};
-use crate::webm::WebM;
+use crate::role::RoleAssets;
+use crate::state::{self, Category};
 use crate::win32::{PetWindow, FRAME_TIMER};
 
 // 菜单 ID
 pub const MID_ACT_BASE: usize = 100;
 pub const MID_MOVE_BASE: usize = 150;
 pub const MID_CLICK_BASE: usize = 160;
-pub const MID_IDLE: usize = 170;
-pub const MID_TURN: usize = 171;
-pub const MID_CORNER: usize = 172;
-pub const MID_ONTOP: usize = 173;
-pub const MID_NOMOVE: usize = 174;
-pub const MID_AUTOSTART: usize = 175;
-pub const MID_SCALE_BASE: usize = 180;
-pub const MID_SPAWN: usize = 191;
-pub const MID_QUIT_PET: usize = 190;
+pub const MID_IDLE_BASE: usize = 170; // 待机二级菜单（多视频）
+pub const MID_TURN_BASE: usize = 180; // 转向二级菜单（多视频）
+pub const MID_CORNER: usize = 190;
+pub const MID_ONTOP: usize = 191;
+pub const MID_NOMOVE: usize = 192;
+pub const MID_AUTOSTART: usize = 193;
+pub const MID_SCALE_BASE: usize = 200;
+pub const MID_ROLE_BASE: usize = 210; // 切换角色子菜单
+pub const MID_SPAWN: usize = 300;
+pub const MID_QUIT_PET: usize = 301;
 
 #[derive(Clone)]
 struct MovePlan {
@@ -48,7 +49,8 @@ struct MovePlan {
 pub struct Pet {
     pub id: usize,
     pub win: PetWindow,
-    pub catalog: Rc<Catalog>,
+    pub role_id: String,
+    pub cats: Category,
     pub clips: HashMap<String, ClipDecoder>,
     pub cur_anim: String,
     pub facing_right: bool,
@@ -71,25 +73,37 @@ pub struct Pet {
     last_tick: Instant,
 }
 
+/// 从角色素材集构建解码器 + 动态分类。
+fn build_from_role(role: &RoleAssets) -> (HashMap<String, ClipDecoder>, Category) {
+    let mut clips: HashMap<String, ClipDecoder> = HashMap::new();
+    for (name, wm) in &role.videos {
+        if let Some(dec) = ClipDecoder::new(wm.clone()) {
+            clips.insert(name.clone(), dec);
+        }
+    }
+    // 无子目录（flat，如内置 shenshen）时 folder_files 传 None → 走"无子目录"分类分支
+    let folder_files = if role.folder_files.is_empty() {
+        None
+    } else {
+        Some(&role.folder_files)
+    };
+    let cats = state::build_categories(&role.names, role.manifest.as_ref(), folder_files);
+    (clips, cats)
+}
+
 impl Pet {
     pub fn new(
         id: usize,
         win: PetWindow,
-        catalog: Rc<Catalog>,
-        anims: &HashMap<String, Rc<WebM>>,
+        role: &Rc<RoleAssets>,
         pc: &PetConfig,
     ) -> Pet {
-        // 构建该宠物的独立解码器
-        let mut clips: HashMap<String, ClipDecoder> = HashMap::new();
-        for (name, wm) in anims {
-            if let Some(dec) = ClipDecoder::new(wm.clone()) {
-                clips.insert(name.clone(), dec);
-            }
-        }
+        let (clips, cats) = build_from_role(role);
         let mut pet = Pet {
             id,
             win,
-            catalog,
+            role_id: role.id.clone(),
+            cats,
             clips,
             cur_anim: String::new(),
             facing_right: pc.facing == "right",
@@ -111,10 +125,21 @@ impl Pet {
         let (w, h) = pet.window_size();
         pet.win.resize(w, h);
         pet.win.set_topmost(pc.on_top);
-        pet.switch_anim(&pet.catalog.idle.clone());
+        let idle = pet.cats.idle.clone().unwrap_or_default();
+        pet.switch_anim(&idle);
         pet.win.show();
         pet.win.start_frame_timer(10);
         pet
+    }
+
+    /// 切换角色：重建解码器 + 分类，回到待机。
+    pub fn apply_role(&mut self, role: &Rc<RoleAssets>) {
+        let (clips, cats) = build_from_role(role);
+        self.role_id = role.id.clone();
+        self.clips = clips;
+        self.cats = cats;
+        let idle = self.cats.idle.clone().unwrap_or_default();
+        self.switch_anim(&idle);
     }
 
     pub fn window_size(&self) -> (i32, i32) {
@@ -167,22 +192,24 @@ impl Pet {
 
     fn on_anim_ended(&mut self) {
         let name = self.cur_anim.clone();
-        if name == self.catalog.drag && self.dragging {
+        let drag = self.cats.drag.clone().unwrap_or_default();
+        if name == drag && self.dragging {
             if let Some(clip) = self.clips.get_mut(&self.cur_anim) {
                 clip.seek(0);
             }
             self.anim_ended_fired = false;
             return;
         }
-        if name == self.catalog.turn {
+        if self.cats.turns.contains(&name) {
             self.facing_right = !self.facing_right;
         }
-        if name == self.catalog.drag || self.catalog.clicks.contains(&name) {
-            self.switch_anim(&self.catalog.idle.clone());
+        if name == drag || self.cats.clicks.contains(&name) {
+            // 交互动画 → 待机缓冲
+            self.switch_anim(&self.cats.idle.clone().unwrap_or_default());
             return;
         }
         let can_move = self.try_plan_move();
-        let next = state::pick_next(&self.catalog, &name, self.no_move, can_move);
+        let next = state::pick_next(&self.cats, &name, self.no_move, can_move);
         self.switch_anim(&next);
     }
 
@@ -201,7 +228,7 @@ impl Pet {
         if target_cx < lx as f64 + state::MOVE_MARGIN + half_w || target_cx > rx as f64 - state::MOVE_MARGIN - half_w {
             return false;
         }
-        let move_name = state::Catalog::pick(&self.catalog.moves, None);
+        let move_name = state::pick(&self.cats.moves, None);
         let duration_ms = self.clips.get(&move_name).map(|c| c.duration_ms()).unwrap_or(2400);
         self.switch_anim(&move_name);
         self.move_plan = Some(MovePlan {
@@ -309,7 +336,7 @@ impl Pet {
     pub fn set_no_move(&mut self, on: bool) {
         self.no_move = on;
         if on && self.move_plan.is_some() {
-            self.switch_anim(&self.catalog.idle.clone());
+            self.switch_anim(&self.cats.idle.clone().unwrap_or_default());
         }
     }
 
@@ -435,7 +462,7 @@ impl Pet {
                 return;
             }
             self.dragging = true;
-            self.switch_anim(&self.catalog.drag.clone());
+            self.switch_anim(&self.cats.drag.clone().unwrap_or_default());
         }
         if let Some(off) = self.grab_offset {
             self.win.move_to(sx - off.0, sy - off.1);
@@ -453,7 +480,7 @@ impl Pet {
                 self.win.move_to(sx - off.0, sy - off.1);
             }
             // 位置保存由 App 在拖拽结束后统一处理
-            self.switch_anim(&self.catalog.idle.clone());
+            self.switch_anim(&self.cats.idle.clone().unwrap_or_default());
         } else {
             self.on_click();
         }
@@ -467,12 +494,12 @@ impl Pet {
             self.just_dragged = false;
             return;
         }
-        if self.cur_anim != self.catalog.idle {
+        if self.cats.idle.as_deref() != Some(self.cur_anim.as_str()) {
             return;
         }
         self.cancel_move();
-        let c = self.catalog.clicks.clone();
-        let pick = state::Catalog::pick(&c, None);
+        let c = self.cats.clicks.clone();
+        let pick = state::pick(&c, None);
         self.switch_anim(&pick);
     }
 
@@ -523,27 +550,64 @@ impl Pet {
 
         let h = unsafe { CreatePopupMenu() };
 
-        let sub_idle = unsafe { CreatePopupMenu() };
-        unsafe {
-            AppendMenuW(sub_idle, MF_STRING, MID_IDLE, wide(&self.catalog.idle));
-            AppendMenuW(sub_idle, MF_STRING, MID_TURN, wide(&self.catalog.turn));
-            AppendMenuW(h, MF_STRING | MF_POPUP, sub_idle as usize, wide("动画 · 待机/转向"));
+        // 动画·待机（多视频二级菜单）
+        if !self.cats.idles.is_empty() {
+            let sub_idle = unsafe { CreatePopupMenu() };
+            for (i, name) in self.cats.idles.iter().enumerate() {
+                unsafe { AppendMenuW(sub_idle, MF_STRING, MID_IDLE_BASE + i, wide(name)) };
+            }
+            unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_idle as usize, wide("动画 · 待机")) };
         }
-        let sub_move = unsafe { CreatePopupMenu() };
-        for (i, name) in self.catalog.moves.iter().enumerate() {
-            unsafe { AppendMenuW(sub_move, MF_STRING, MID_MOVE_BASE + i, wide(name)) };
+        // 动画·转向（多视频二级菜单）
+        if !self.cats.turns.is_empty() {
+            let sub_turn = unsafe { CreatePopupMenu() };
+            for (i, name) in self.cats.turns.iter().enumerate() {
+                unsafe { AppendMenuW(sub_turn, MF_STRING, MID_TURN_BASE + i, wide(name)) };
+            }
+            unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_turn as usize, wide("动画 · 转向")) };
         }
-        unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_move as usize, wide("动画 · 移动")) };
-        let sub_click = unsafe { CreatePopupMenu() };
-        for (i, name) in self.catalog.clicks.iter().enumerate() {
-            unsafe { AppendMenuW(sub_click, MF_STRING, MID_CLICK_BASE + i, wide(name)) };
+        // 动画·移动
+        if !self.cats.moves.is_empty() {
+            let sub_move = unsafe { CreatePopupMenu() };
+            for (i, name) in self.cats.moves.iter().enumerate() {
+                unsafe { AppendMenuW(sub_move, MF_STRING, MID_MOVE_BASE + i, wide(name)) };
+            }
+            unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_move as usize, wide("动画 · 移动")) };
         }
-        unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_click as usize, wide("动画 · 点击回应")) };
-        let sub_acts = unsafe { CreatePopupMenu() };
-        for (i, name) in self.catalog.acts.iter().enumerate() {
-            unsafe { AppendMenuW(sub_acts, MF_STRING, MID_ACT_BASE + i, wide(name)) };
+        // 动画·点击回应
+        if !self.cats.clicks.is_empty() {
+            let sub_click = unsafe { CreatePopupMenu() };
+            for (i, name) in self.cats.clicks.iter().enumerate() {
+                unsafe { AppendMenuW(sub_click, MF_STRING, MID_CLICK_BASE + i, wide(name)) };
+            }
+            unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_click as usize, wide("动画 · 点击回应")) };
         }
-        unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_acts as usize, wide("动画 · 随机动作")) };
+        // 动画·随机动作
+        if !self.cats.acts.is_empty() {
+            let sub_acts = unsafe { CreatePopupMenu() };
+            for (i, name) in self.cats.acts.iter().enumerate() {
+                unsafe { AppendMenuW(sub_acts, MF_STRING, MID_ACT_BASE + i, wide(name)) };
+            }
+            unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_acts as usize, wide("动画 · 随机动作")) };
+        }
+
+        // 切换角色（多角色时显示）
+        let chars = crate::role::list_characters();
+        if chars.len() > 1 {
+            let sub_role = unsafe { CreatePopupMenu() };
+            for (i, cid) in chars.iter().enumerate() {
+                let checked = self.role_id == *cid;
+                unsafe {
+                    AppendMenuW(
+                        sub_role,
+                        if checked { MF_STRING | MF_CHECKED } else { MF_STRING },
+                        MID_ROLE_BASE + i,
+                        wide(cid),
+                    )
+                };
+            }
+            unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_role as usize, wide("切换角色")) };
+        }
 
         unsafe { AppendMenuW(h, MF_SEPARATOR, 0, std::ptr::null()) };
         unsafe { AppendMenuW(h, MF_STRING, MID_CORNER, wide("回到右下角")) };
@@ -578,11 +642,9 @@ impl Pet {
         cmd as usize
     }
 
-    /// 执行宠物自身的命令（动画/位置/大小/置顶/不移动）。全局命令由 App 处理。
+    /// 执行宠物自身的命令（动画/位置/大小/置顶/不移动）。全局命令（角色切换/生成/删除）由 App 处理。
     pub fn apply_command(&mut self, id: usize) {
         match id {
-            MID_IDLE => self.switch_anim(&self.catalog.idle.clone()),
-            MID_TURN => self.switch_anim(&self.catalog.turn.clone()),
             MID_CORNER => self.go_corner(),
             MID_ONTOP => {
                 let on = !self.win_topmost;
@@ -593,20 +655,30 @@ impl Pet {
                 self.set_no_move(on);
             }
             _ => {
-                if id >= MID_ACT_BASE && id < MID_ACT_BASE + 42 {
+                if id >= MID_IDLE_BASE && id < MID_IDLE_BASE + 50 {
+                    let i = id - MID_IDLE_BASE;
+                    if i < self.cats.idles.len() {
+                        self.switch_anim(&self.cats.idles[i].clone());
+                    }
+                } else if id >= MID_TURN_BASE && id < MID_TURN_BASE + 50 {
+                    let i = id - MID_TURN_BASE;
+                    if i < self.cats.turns.len() {
+                        self.switch_anim(&self.cats.turns[i].clone());
+                    }
+                } else if id >= MID_ACT_BASE && id < MID_ACT_BASE + 50 {
                     let i = id - MID_ACT_BASE;
-                    if i < self.catalog.acts.len() {
-                        self.switch_anim(&self.catalog.acts[i].clone());
+                    if i < self.cats.acts.len() {
+                        self.switch_anim(&self.cats.acts[i].clone());
                     }
-                } else if id >= MID_MOVE_BASE && id < MID_MOVE_BASE + 3 {
+                } else if id >= MID_MOVE_BASE && id < MID_MOVE_BASE + 20 {
                     let i = id - MID_MOVE_BASE;
-                    if i < self.catalog.moves.len() {
-                        self.trigger_move(&self.catalog.moves[i].clone());
+                    if i < self.cats.moves.len() {
+                        self.trigger_move(&self.cats.moves[i].clone());
                     }
-                } else if id >= MID_CLICK_BASE && id < MID_CLICK_BASE + 3 {
+                } else if id >= MID_CLICK_BASE && id < MID_CLICK_BASE + 20 {
                     let i = id - MID_CLICK_BASE;
-                    if i < self.catalog.clicks.len() {
-                        self.switch_anim(&self.catalog.clicks[i].clone());
+                    if i < self.cats.clicks.len() {
+                        self.switch_anim(&self.cats.clicks[i].clone());
                     }
                 } else if id >= MID_SCALE_BASE && id < MID_SCALE_BASE + 4 {
                     let i = id - MID_SCALE_BASE;

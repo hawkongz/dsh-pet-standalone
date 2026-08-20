@@ -1,7 +1,6 @@
-//! 桌宠应用：管理多只桌宠（窗口/状态机/交互）+ 托盘 + 菜单分发 + 开机自启。
+//! 桌宠应用：管理多只桌宠（窗口/状态机/交互）+ 角色切换 + 托盘 + 菜单分发 + 开机自启。
 #![allow(non_snake_case, dead_code)]
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use windows_sys::Win32::{
@@ -11,17 +10,18 @@ use windows_sys::Win32::{
 
 use crate::config::{Config, PetConfig};
 use crate::pet::{self, Pet};
-use crate::state::Catalog;
+use crate::role::{self, RoleAssets};
+use crate::state;
 use crate::tray;
-use crate::webm::WebM;
 use crate::win32::{PetWindow, WindowCallback};
 
 pub const WM_TRAY: u32 = WM_APP + 100;
 
 pub struct App {
     pub pets: Vec<Pet>,
-    pub catalog: Rc<Catalog>,
-    pub anims: HashMap<String, Rc<WebM>>,
+    /// 当前角色素材集（所有宠物共享解码器源）。
+    pub role: Rc<RoleAssets>,
+    pub current_character: String,
     pub cfg: Config,
     pub quitting: bool,
     next_pet_id: usize,
@@ -30,20 +30,37 @@ pub struct App {
 
 impl App {
     pub fn new(instance: windows_sys::Win32::Foundation::HINSTANCE) -> App {
-        // 共享素材：解析全部 webm（内存共享，各宠物独立解码器）
-        let catalog = Rc::new(Catalog::from_assets());
-        let mut anims: HashMap<String, Rc<WebM>> = HashMap::new();
-        for (name, start, len) in crate::assets::ANIMS {
-            let data = &crate::assets::ASSET_PAK[*start..*start + *len];
-            if let Some(wm) = crate::webm::WebM::parse(data) {
-                anims.insert(name.to_string(), Rc::new(wm));
-            }
-        }
         let cfg = Config::load();
+        // 加载配置中的角色（失败回退默认）
+        let character = cfg.character.clone();
+        let role = match role::load_role(&character) {
+            Some(r) => Rc::new(r),
+            None => match role::load_role(state::DEFAULT_CHARACTER) {
+                Some(r) => Rc::new(r),
+                None => {
+                    // 极端情况：无任何素材，返回空（主流程会因 pets 为空退出）
+                    return App {
+                        pets: Vec::new(),
+                        role: Rc::new(RoleAssets {
+                            id: state::DEFAULT_CHARACTER.to_string(),
+                            videos: std::collections::HashMap::new(),
+                            folder_files: std::collections::HashMap::new(),
+                            manifest: None,
+                            names: Vec::new(),
+                        }),
+                        current_character: state::DEFAULT_CHARACTER.to_string(),
+                        cfg,
+                        quitting: false,
+                        next_pet_id: 1,
+                        instance,
+                    };
+                }
+            },
+        };
         let mut app = App {
             pets: Vec::new(),
-            catalog,
-            anims,
+            role,
+            current_character: character,
             cfg,
             quitting: false,
             next_pet_id: 1,
@@ -61,7 +78,7 @@ impl App {
     /// 用已有配置创建宠物（按 id 追加）。
     fn spawn_pet_from_cfg(&mut self, id: usize, pc: &PetConfig) {
         if let Some(win) = PetWindow::create(self.instance, pc.on_top) {
-            let mut pet = Pet::new(id, win, self.catalog.clone(), &self.anims, pc);
+            let mut pet = Pet::new(id, win, &self.role, pc);
             pet.restore_position(pc);
             self.pets.push(pet);
             if self.next_pet_id <= id {
@@ -74,21 +91,35 @@ impl App {
     pub fn spawn_pet(&mut self) {
         let id = self.next_pet_id;
         self.next_pet_id += 1;
-        // 新宠物放在已有宠物附近错开
         let mut pc = PetConfig::default();
         if let Some(first) = self.pets.first() {
-            let (x, y, x2, _y2) = first.win.get_rect();
-            // 通过临时设置初始位置：往右下方错开 30px
             if let Some(p0) = self.cfg.pets.first() {
                 pc.rx = p0.rx.map(|v| v + 0.02);
                 pc.ry = p0.ry.map(|v| v + 0.02);
             }
-            let _ = (x, y, x2);
+            let _ = first;
         }
         self.spawn_pet_from_cfg(id, &pc);
         self.cfg.pets = self.pets.iter().map(|_| PetConfig::default()).collect();
-        // 立即保存各宠物当前配置
         self.save_all_positions();
+    }
+
+    /// 切换角色：加载新角色素材，重建所有宠物。
+    pub fn switch_character(&mut self, id: &str) {
+        if id == self.current_character {
+            return;
+        }
+        let role = match role::load_role(id) {
+            Some(r) => Rc::new(r),
+            None => return,
+        };
+        self.current_character = id.to_string();
+        self.cfg.character = id.to_string();
+        self.cfg.save();
+        self.role = role;
+        for pet in &mut self.pets {
+            pet.apply_role(&self.role);
+        }
     }
 
     /// 退出当前宠物（最后一只则退出整个应用）。
@@ -161,7 +192,14 @@ impl App {
                 crate::autostart::set_enabled(on);
             }
             _ => {
-                if let Some(pet) = self.pets.iter_mut().find(|p| p.win.hwnd == hwnd) {
+                if cmd >= pet::MID_ROLE_BASE && cmd < pet::MID_ROLE_BASE + 100 {
+                    // 切换角色
+                    let chars = role::list_characters();
+                    let i = cmd - pet::MID_ROLE_BASE;
+                    if let Some(cid) = chars.get(i) {
+                        self.switch_character(cid);
+                    }
+                } else if let Some(pet) = self.pets.iter_mut().find(|p| p.win.hwnd == hwnd) {
                     pet.apply_command(cmd);
                 }
                 self.save_all_positions();
