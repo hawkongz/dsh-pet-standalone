@@ -5,17 +5,15 @@ use std::rc::Rc;
 
 use windows_sys::Win32::{
     Foundation::{HWND, LRESULT, LPARAM, WPARAM},
-    UI::WindowsAndMessaging::{PostMessageW, PostQuitMessage, WM_APP, WM_CLOSE, WM_LBUTTONUP, WM_RBUTTONUP},
+    UI::WindowsAndMessaging::{PostMessageW, PostQuitMessage, WM_CLOSE, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP},
 };
 
 use crate::config::{Config, PetConfig};
 use crate::pet::{self, Pet};
 use crate::role::{self, RoleAssets};
 use crate::state;
-use crate::tray;
+use crate::tray::{self, WM_TRAY};
 use crate::win32::{PetWindow, WindowCallback};
-
-pub const WM_TRAY: u32 = WM_APP + 100;
 
 pub struct App {
     pub pets: Vec<Pet>,
@@ -232,11 +230,9 @@ impl WindowCallback for App {
             }
             WM_TRAY => {
                 let msg2 = (lparam & 0xFFFF) as u32;
-                if msg2 == 0x0202 {
-                    // WM_LBUTTONDBLCLK
+                if msg2 == WM_LBUTTONDBLCLK {
                     self.toggle_all_visible();
-                } else if msg2 == 0x0203 {
-                    // WM_RBUTTONUP
+                } else if msg2 == WM_RBUTTONUP {
                     tray::show_menu(self);
                 }
                 Some(0)
