@@ -1,16 +1,14 @@
 //! 系统托盘（Shell_NotifyIconW）。
 use windows_sys::Win32::{
-    Foundation::{HWND, WPARAM},
-    UI::Shell::{
-        NOTIFYICONDATAW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-        NIM_MODIFY, NOTIFYICON_VERSION, NOTIFYICON_VERSION_4,
-    },
-    UI::WindowsAndMessaging::{CreatePopupMenu, AppendMenuW, DestroyMenu, TrackPopupMenu, MF_STRING, MF_SEPARATOR, MF_CHECKED, MF_POPUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_RETURNCMD},
+    Foundation::HWND,
+    UI::Shell::{NOTIFYICONDATAW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE},
+    UI::WindowsAndMessaging::{CreatePopupMenu, AppendMenuW, DestroyMenu, TrackPopupMenu, MF_STRING, MF_SEPARATOR, MF_CHECKED, MF_POPUP, WM_APP, TPM_RIGHTBUTTON, TPM_RETURNCMD},
 };
 
 use crate::app::App;
 
-pub const WM_TRAY: u32 = 0x0400 + 100; // 需与 app.rs 一致
+/// 托盘回调消息号（WM_APP 区间），app.rs 的 WM_TRAY 分发引用此处。
+pub const WM_TRAY: u32 = WM_APP + 100;
 
 pub struct Tray {
     added: bool,
