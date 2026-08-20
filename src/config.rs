@@ -20,7 +20,7 @@ impl PetConfig {
             rx: None,
             ry: None,
             facing: "left".to_string(),
-            scale: 0.72,
+            scale: crate::state::DEFAULT_SCALE,
             on_top: true,
             no_move: false,
         }
@@ -193,7 +193,7 @@ fn parse_pet_object(bytes: &[u8], i: &mut usize, n: usize) -> Option<PetConfig> 
         *i = next;
         match key.as_str() {
             "facing" => pc.facing = val.to_string(),
-            "scale" => pc.scale = val.trim().parse().unwrap_or(0.72),
+            "scale" => pc.scale = val.trim().parse().unwrap_or(crate::state::DEFAULT_SCALE),
             "on_top" => pc.on_top = val.trim() == "true",
             "no_move" => pc.no_move = val.trim() == "true",
             "rx" => pc.rx = val.trim().parse().ok(),
