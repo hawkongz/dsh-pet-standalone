@@ -337,7 +337,7 @@ pub fn pick_next(cat: &Category, current: &str, no_move: bool, can_move: bool) -
     }
     // 移动分支
     if !no_move && can_move && !cat.moves.is_empty() {
-        return pick(&cat.moves, None);
+        return pick(&cat.moves, Some(current));
     }
     pick(&cat.acts, Some(current))
 }
