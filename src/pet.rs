@@ -7,11 +7,12 @@ use std::time::Instant;
 
 use windows_sys::Win32::{
     Foundation::{POINT, LPARAM, LRESULT, WPARAM},
+    UI::HiDpi::GetDpiForWindow,
     UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
     UI::WindowsAndMessaging::{
         CreatePopupMenu, GetCursorPos, TrackPopupMenu, AppendMenuW,
-        DestroyMenu, PostQuitMessage,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, HTCLIENT, HTTRANSPARENT,
+        DestroyMenu,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, HTCLIENT, HTTRANSPARENT,
         TPM_RIGHTBUTTON, TPM_RETURNCMD, MF_POPUP, MF_STRING, MF_CHECKED, MF_SEPARATOR,
         WM_NCHITTEST, WM_TIMER,
     },
@@ -55,6 +56,8 @@ pub struct Pet {
     pub cur_anim: String,
     pub facing_right: bool,
     pub scale: f64,
+    /// 窗口所在显示器 DPI / 96（高分屏适配，跨屏拖动时动态更新）。
+    pub dpi_scale: f64,
     pub no_move: bool,
     pub win_topmost: bool,
     pub visible: bool,
@@ -99,6 +102,8 @@ impl Pet {
         pc: &PetConfig,
     ) -> Pet {
         let (clips, cats) = build_from_role(role);
+        let dpi = unsafe { GetDpiForWindow(win.hwnd) };
+        let dpi_scale = if dpi > 0 { dpi as f64 / 96.0 } else { 1.0 };
         let mut pet = Pet {
             id,
             win,
@@ -108,6 +113,7 @@ impl Pet {
             cur_anim: String::new(),
             facing_right: pc.facing == "right",
             scale: pc.scale,
+            dpi_scale,
             no_move: pc.no_move,
             win_topmost: pc.on_top,
             visible: true,
@@ -143,9 +149,25 @@ impl Pet {
     }
 
     pub fn window_size(&self) -> (i32, i32) {
-        let w = (state::CANVAS_W * self.scale).round() as i32;
-        let h = ((state::CANVAS_H + state::PAD) * self.scale).round() as i32;
+        let w = (state::CANVAS_W * self.scale * self.dpi_scale).round() as i32;
+        let h = ((state::CANVAS_H + state::PAD) * self.scale * self.dpi_scale).round() as i32;
         (w.max(1), h.max(1))
+    }
+
+    /// 高分屏适配：按窗口所在显示器 DPI 重新计算物理尺寸。
+    /// 跨屏拖动时每 tick 检测，DPI 变化则按新的比例重绘并保持落地位置。
+    fn refresh_dpi(&mut self) {
+        let dpi = unsafe { GetDpiForWindow(self.win.hwnd) };
+        let s = if dpi > 0 { dpi as f64 / 96.0 } else { 1.0 };
+        if (s - self.dpi_scale).abs() < 1e-6 {
+            return;
+        }
+        let old_bottom = self.win.get_rect().3;
+        self.dpi_scale = s;
+        let (wx, wh) = self.window_size();
+        self.win.resize(wx, wh);
+        self.win.move_to(self.win.get_rect().0, old_bottom - wh + 1);
+        self.render_current();
     }
 
     pub fn switch_anim(&mut self, name: &str) {
@@ -364,8 +386,9 @@ impl Pet {
         }
     }
 
-    /// 每 tick（10ms）驱动：帧推进 + 移动插值。
+    /// 每 tick（10ms）驱动：DPI 检测 + 帧推进 + 移动插值。
     fn on_tick(&mut self) {
+        self.refresh_dpi();
         let dt = self.last_tick.elapsed();
         self.last_tick = Instant::now();
         let dt_ms = dt.as_millis() as u64;
@@ -467,7 +490,7 @@ impl Pet {
         let dy = sy - py;
         let dist = ((dx * dx + dy * dy) as f64).sqrt();
         if !self.dragging {
-            if dist < state::DRAG_THRESHOLD * self.scale {
+            if dist < state::DRAG_THRESHOLD * self.scale * self.dpi_scale {
                 return;
             }
             self.dragging = true;
@@ -632,10 +655,12 @@ impl Pet {
         };
         let sub_scale = unsafe { CreatePopupMenu() };
         for (i, s) in state::SCALE_STEPS.iter().enumerate() {
-            let px = (state::CANVAS_W * s).round() as i32;
+            // 尺寸是相对 640×360 源分辨率的倍数，物理像素随 DPI 变化，
+            // 用百分比标注（50% = 源分辨率的一半），避免与 DPI 混淆
+            let pct = (s * 100.0).round() as i32;
             let checked = (self.scale - s).abs() < 0.02;
             unsafe {
-                AppendMenuW(sub_scale, if checked { MF_STRING | MF_CHECKED } else { MF_STRING }, MID_SCALE_BASE + i, wide(&format!("{}px", px)))
+                AppendMenuW(sub_scale, if checked { MF_STRING | MF_CHECKED } else { MF_STRING }, MID_SCALE_BASE + i, wide(&format!("{}%", pct)))
             };
         }
         unsafe { AppendMenuW(h, MF_STRING | MF_POPUP, sub_scale as usize, wide("大小")) };
@@ -664,32 +689,33 @@ impl Pet {
                 self.set_no_move(on);
             }
             _ => {
-                if id >= MID_IDLE_BASE && id < MID_IDLE_BASE + 50 {
-                    let i = id - MID_IDLE_BASE;
-                    if i < self.cats.idles.len() {
-                        self.switch_anim(&self.cats.idles[i].clone());
-                    }
-                } else if id >= MID_TURN_BASE && id < MID_TURN_BASE + 50 {
-                    let i = id - MID_TURN_BASE;
-                    if i < self.cats.turns.len() {
-                        self.switch_anim(&self.cats.turns[i].clone());
-                    }
-                } else if id >= MID_ACT_BASE && id < MID_ACT_BASE + 50 {
+                // 各子菜单区间必须互不重叠，否则后面的分支会被前面的吞掉
+                if id >= MID_ACT_BASE && id < MID_ACT_BASE + 50 {
                     let i = id - MID_ACT_BASE;
                     if i < self.cats.acts.len() {
                         self.switch_anim(&self.cats.acts[i].clone());
                     }
-                } else if id >= MID_MOVE_BASE && id < MID_MOVE_BASE + 20 {
+                } else if id >= MID_MOVE_BASE && id < MID_MOVE_BASE + 10 {
                     let i = id - MID_MOVE_BASE;
                     if i < self.cats.moves.len() {
                         self.trigger_move(&self.cats.moves[i].clone());
                     }
-                } else if id >= MID_CLICK_BASE && id < MID_CLICK_BASE + 20 {
+                } else if id >= MID_CLICK_BASE && id < MID_CLICK_BASE + 10 {
                     let i = id - MID_CLICK_BASE;
                     if i < self.cats.clicks.len() {
                         self.switch_anim(&self.cats.clicks[i].clone());
                     }
-                } else if id >= MID_SCALE_BASE && id < MID_SCALE_BASE + 4 {
+                } else if id >= MID_IDLE_BASE && id < MID_IDLE_BASE + 10 {
+                    let i = id - MID_IDLE_BASE;
+                    if i < self.cats.idles.len() {
+                        self.switch_anim(&self.cats.idles[i].clone());
+                    }
+                } else if id >= MID_TURN_BASE && id < MID_TURN_BASE + 10 {
+                    let i = id - MID_TURN_BASE;
+                    if i < self.cats.turns.len() {
+                        self.switch_anim(&self.cats.turns[i].clone());
+                    }
+                } else if id >= MID_SCALE_BASE && id < MID_SCALE_BASE + 10 {
                     let i = id - MID_SCALE_BASE;
                     if i < state::SCALE_STEPS.len() {
                         self.change_scale(state::SCALE_STEPS[i]);
