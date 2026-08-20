@@ -150,7 +150,16 @@ impl Pet {
 
     pub fn switch_anim(&mut self, name: &str) {
         if self.cur_anim == name {
-            return;
+            // 同名动画：若当前 clip 尚未播完则不打断；若已播完（cur 越界）
+            // 必须回卷重播，否则会永久定格在最后一帧
+            let still_playing = self
+                .clips
+                .get(&self.cur_anim)
+                .map(|c| c.cur < c.frame_count())
+                .unwrap_or(false);
+            if still_playing {
+                return;
+            }
         }
         self.cancel_move();
         self.cur_anim = name.to_string();
