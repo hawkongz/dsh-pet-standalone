@@ -5,8 +5,9 @@ use std::ffi::c_void;
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LRESULT, LPARAM, POINT, RECT, SIZE, WPARAM},
     Graphics::Gdi::{
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection,
-        DeleteDC, DeleteObject, DIB_RGB_COLORS, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CombineRgn, CreateCompatibleDC,
+        CreateDIBSection, CreateRectRgn, DeleteDC, DeleteObject, DIB_RGB_COLORS, SelectObject,
+        AC_SRC_ALPHA, AC_SRC_OVER, RGN_OR, SetWindowRgn,
     },
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect,
@@ -57,6 +58,9 @@ pub struct PetWindow {
     pub height: i32,
     bits: *mut u8,
     pub alpha: Vec<u8>,
+    /// 当前已应用区域的矩形缓存（窗口坐标，(l,t,r,b)，逐行 RLE）。
+    /// 若帧的掩码与缓存一致则跳过重建。
+    hits: Vec<(i32, i32, i32, i32)>,
 }
 
 pub const FRAME_TIMER: usize = 1;
@@ -123,6 +127,7 @@ impl PetWindow {
             height: 1,
             bits: std::ptr::null_mut(),
             alpha: Vec::new(),
+            hits: Vec::new(),
         };
         pet.resize(1, 1);
         Some(pet)
@@ -169,6 +174,7 @@ impl PetWindow {
         self.width = width;
         self.height = height;
         self.alpha = vec![0u8; (width * height) as usize];
+        self.hits.clear();
     }
 
     pub fn show(&self) {
@@ -260,6 +266,9 @@ impl PetWindow {
                 2, // ULW_ALPHA
             );
         }
+        // 每帧同步命中区域：树懒/走路等动画掩码会变，区域必须跟着变，
+        // 否则旧形状以外的新帧像素点不动、旧帧位置透传错位。
+        self.update_hit_region();
     }
 
     /// 命中测试：像素 alpha<128 穿透。
@@ -268,6 +277,72 @@ impl PetWindow {
             return false;
         }
         self.alpha[(y * self.width + x) as usize] >= 128
+    }
+
+    /// 按当前帧 alpha 掩码重建窗口区域（SetWindowRgn）。
+    ///
+    /// 为什么必须做：分层窗口的命中测试把整个窗口矩形都当作"可命中"，
+    /// 透明像素也一样（只要 alpha 非 0）。WM_NCHITTEST 返回 HTTRANSPARENT
+    /// 只把点击转给"同一线程"的底层窗口 —— 底下是资源管理器/其他进程时
+    /// 点击会被大肥鱼窗口吞掉，表现为大肥鱼周围一大片透明区域点不动文件。
+    /// 用窗口区域把形状真正限死：区域外的像素在系统层面就不属于本窗口，
+    /// 点击会直通到下层窗口（任意线程/进程），区域内像素走正常命中。
+    /// 阈值与 hit_test_alpha 保持一致（>=128），区域按行 RLE 逐段
+    /// CreateRectRgn + CombineRgn（ExtCreateRegion 在本机有兼容问题，勿用）。
+    fn update_hit_region(&mut self) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let m = &self.alpha;
+        let mut runs: Vec<(i32, i32, i32, i32)> = Vec::new();
+        for y in 0..h {
+            let row = &m[y * w..(y + 1) * w];
+            let mut x = 0usize;
+            while x < w {
+                if row[x] < 128 {
+                    x += 1;
+                    continue;
+                }
+                let s = x;
+                while x < w && row[x] >= 128 {
+                    x += 1;
+                }
+                runs.push((s as i32, y as i32, x as i32, y as i32 + 1));
+            }
+        }
+        if runs == self.hits {
+            return; // 掩码没变（如定格帧），区域不用重建
+        }
+        self.hits = runs;
+        if self.hits.is_empty() {
+            return; // 全透明帧：保留上一个区域，等掩码恢复
+        }
+        unsafe {
+            let mut acc: *mut c_void = std::ptr::null_mut();
+            for r in &self.hits {
+                let rr = CreateRectRgn(r.0, r.1, r.2, r.3);
+                if rr.is_null() {
+                    break;
+                }
+                if acc.is_null() {
+                    acc = rr;
+                } else {
+                    CombineRgn(acc, acc, rr, RGN_OR);
+                    DeleteObject(rr as _);
+                }
+            }
+            if !acc.is_null() {
+                // 成功后窗口接管 acc（由系统释放，之后不得再删除）；
+                // 失败则删掉避免泄漏（区域很小，极端内存压力下才可能发生）。
+                // bRedraw=0：分层窗口由本帧 UpdateLayeredWindow 负责重绘，
+                // 让系统再重绘一次纯属浪费（实测 CPU 高约 20%）。
+                if SetWindowRgn(self.hwnd, acc, 0) == 0 {
+                    DeleteObject(acc as _);
+                }
+            }
+        }
     }
 
     pub fn start_frame_timer(&self, interval_ms: u32) {
