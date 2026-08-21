@@ -8,13 +8,19 @@ use std::time::Instant;
 use windows_sys::Win32::{
     Foundation::{POINT, LPARAM, LRESULT, WPARAM},
     UI::HiDpi::GetDpiForWindow,
-    UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
+    UI::Controls::WM_MOUSELEAVE,
+    UI::Input::KeyboardAndMouse::{
+        ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+    },
     UI::WindowsAndMessaging::{
         CreatePopupMenu, GetCursorPos, TrackPopupMenu, AppendMenuW,
         DestroyMenu,
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, HTCLIENT, HTTRANSPARENT,
         TPM_RIGHTBUTTON, TPM_RETURNCMD, MF_POPUP, MF_STRING, MF_CHECKED, MF_SEPARATOR,
         WM_NCHITTEST, WM_TIMER,
+        WM_SETCURSOR, WM_NULL, LoadCursorW, LoadCursorFromFileW, SetCursor,
+        SetForegroundWindow, PostMessageW,
+        HCURSOR, IDC_HAND, IDC_ARROW,
     },
 };
 
@@ -38,6 +44,11 @@ pub const MID_SCALE_BASE: usize = 200;
 pub const MID_ROLE_BASE: usize = 210; // 切换角色子菜单
 pub const MID_SPAWN: usize = 300;
 pub const MID_QUIT_PET: usize = 301;
+
+/// 内嵌的"张手"(grab) 光标（五指张开白手套），等效原版浏览器 cursor:grab。
+const GRAB_CUR: &[u8] = include_bytes!("../assets/cursor_grab.cur");
+/// 内嵌的"闭手"(grabbing) 光标（握拳），按住左键时显示。
+const GRAB_CLOSED_CUR: &[u8] = include_bytes!("../assets/cursor_grabbing.cur");
 
 #[derive(Clone)]
 struct MovePlan {
@@ -73,6 +84,11 @@ pub struct Pet {
     move_plan: Option<MovePlan>,
     move_accum_ms: u64,
 
+    /// 张手光标句柄（悬停显示；加载失败回退 IDC_HAND）。
+    cursor_open: HCURSOR,
+    /// 闭手光标句柄（按住左键显示；加载失败回退 IDC_HAND）。
+    cursor_closed: HCURSOR,
+
     last_tick: Instant,
 }
 
@@ -104,6 +120,8 @@ impl Pet {
         let (clips, cats) = build_from_role(role);
         let dpi = unsafe { GetDpiForWindow(win.hwnd) };
         let dpi_scale = if dpi > 0 { dpi as f64 / 96.0 } else { 1.0 };
+        let cursor_open = load_embedded_cur(GRAB_CUR);
+        let cursor_closed = load_embedded_cur(GRAB_CLOSED_CUR);
         let mut pet = Pet {
             id,
             win,
@@ -126,6 +144,8 @@ impl Pet {
             just_dragged: false,
             move_plan: None,
             move_accum_ms: 0,
+            cursor_open,
+            cursor_closed,
             last_tick: Instant::now(),
         };
         let (w, h) = pet.window_size();
@@ -466,6 +486,14 @@ impl Pet {
     fn on_lbutton_down(&mut self, lparam: LPARAM) {
         // 捕获鼠标：快速拖拽时鼠标移出窗口仍能收到事件（原版 Qt 自动捕获）
         unsafe { SetCapture(self.win.hwnd) };
+        // 按住左键 → 闭手（抓握中）
+        unsafe {
+            SetCursor(if self.cursor_closed.is_null() {
+                LoadCursorW(std::ptr::null_mut(), IDC_HAND)
+            } else {
+                self.cursor_closed
+            });
+        }
         let (cx, cy) = client_pos(lparam);
         let (wx, wy, _, _) = self.win.get_rect();
         let (sx, sy) = (wx + cx, wy + cy);
@@ -506,6 +534,18 @@ impl Pet {
         // 释放鼠标捕获
         unsafe { ReleaseCapture() };
         let (sx, sy) = cursor_pos();
+        // 松手：鼠标仍停在宠物身上 → 恢复张手；否则交给 WM_MOUSELEAVE/系统还原箭头
+        let (wx, wy, _, _) = self.win.get_rect();
+        let over_pet = self.win.hit_test_alpha(sx - wx, sy - wy);
+        unsafe {
+            if over_pet {
+                SetCursor(if self.cursor_open.is_null() {
+                    LoadCursorW(std::ptr::null_mut(), IDC_HAND)
+                } else {
+                    self.cursor_open
+                });
+            }
+        }
         if was_dragging {
             self.just_dragged = true;
             if let Some(off) = self.grab_offset {
@@ -548,6 +588,36 @@ impl Pet {
                 } else {
                     Some(HTTRANSPARENT as LRESULT)
                 }
+            }
+            WM_SETCURSOR => {
+                // 悬浮在宠物本体（不透明像素，等效命中层）上时显示"手套"（手形）光标，
+                // 等效原版插件的 cursor:grab；透明像素/离开时还原箭头。
+                let ht = (lparam & 0xFFFF) as u32;
+                if ht == HTCLIENT {
+                    unsafe {
+                        // 张手(grab)光标；加载失败回退 IDC_HAND
+                        SetCursor(if self.cursor_open.is_null() {
+                            LoadCursorW(std::ptr::null_mut(), IDC_HAND)
+                        } else {
+                            self.cursor_open
+                        });
+                        // 跟踪鼠标离开：离开窗口时收到 WM_MOUSELEAVE 还原箭头，
+                        // 避免光标"黏"在手形上（桌面等无光标设置的窗口不会重置）。
+                        let mut tme: TRACKMOUSEEVENT = std::mem::zeroed();
+                        tme.cbSize = std::mem::size_of::<TRACKMOUSEEVENT>() as u32;
+                        tme.dwFlags = TME_LEAVE;
+                        tme.hwndTrack = self.win.hwnd;
+                        TrackMouseEvent(&mut tme);
+                    }
+                    Some(0)
+                } else {
+                    unsafe { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW)) };
+                    Some(0)
+                }
+            }
+            WM_MOUSELEAVE => {
+                unsafe { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW)) };
+                Some(0)
             }
             WM_TIMER if (wparam as usize) == FRAME_TIMER => {
                 self.on_tick();
@@ -669,7 +739,13 @@ impl Pet {
         unsafe { AppendMenuW(h, MF_STRING, MID_QUIT_PET, wide("删除此桌宠")) };
 
         let cmd = unsafe {
-            TrackPopupMenu(h, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, self.win.hwnd, std::ptr::null())
+            // WS_EX_NOACTIVATE 窗口不会成为前台窗口：TrackPopupMenu 收不到
+            // 激活事件，点菜单外不会自动关闭（只能再点宠物一下）。
+            // SetForegroundWindow + WM_NULL 是经典修复。
+            SetForegroundWindow(self.win.hwnd);
+            let cmd = TrackPopupMenu(h, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, self.win.hwnd, std::ptr::null());
+            PostMessageW(self.win.hwnd, WM_NULL, 0, 0);
+            cmd
         };
         unsafe { DestroyMenu(h) };
 
@@ -740,6 +816,28 @@ fn cursor_pos() -> (i32, i32) {
     } else {
         (i32::MIN, i32::MIN)
     }
+}
+
+/// 把内嵌光标字节写到临时文件并加载。
+/// 文件名带内容哈希：LoadCursorFromFileW 按路径做会话级缓存，
+/// 若沿用固定文件名，换光标后仍会加载到缓存里的旧光标。
+fn load_embedded_cur(bytes: &[u8]) -> HCURSOR {
+    let mut h: u32 = 2166136261;
+    for b in bytes {
+        h ^= *b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    if let Some(p) = std::env::temp_dir()
+        .join(format!("dsh_pet_cur_{h:08x}.cur"))
+        .to_str()
+        .map(|s| s.to_string())
+    {
+        if std::fs::write(&p, bytes).is_ok() {
+            let mut pc: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
+            return unsafe { LoadCursorFromFileW(pc.as_ptr()) };
+        }
+    }
+    std::ptr::null_mut()
 }
 
 fn wide(s: &str) -> *const u16 {

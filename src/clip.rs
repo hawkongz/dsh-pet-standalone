@@ -19,8 +19,11 @@ pub struct ClipDecoder {
 
 impl ClipDecoder {
     pub fn new(webm: Rc<WebM>) -> Option<ClipDecoder> {
-        let color_dec = vpx::Decoder::new(4)?;
-        let alpha_dec = webm.frames.iter().any(|f| f.alpha.is_some()).then(|| vpx::Decoder::new(2)).flatten();
+        // 实测：vendor libvpx (v1.14.1) 多线程 (row-mt job queue) 解码存在数据竞争，
+        // 同一视频两次解码产生不同像素（运动边缘处随机冒出错误颜色）。
+        // 固定 1 线程消除竞争（解码 640x360 单线程 ~5-10ms/帧，足够 24fps）。
+        let color_dec = vpx::Decoder::new(1)?;
+        let alpha_dec = webm.frames.iter().any(|f| f.alpha.is_some()).then(|| vpx::Decoder::new(1)).flatten();
         // 预计算 YUV->RGB 有限范围 BT.601 亮度系数
         let mut ytab = [0i32; 256];
         for i in 0..256usize {
