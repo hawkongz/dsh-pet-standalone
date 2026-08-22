@@ -42,8 +42,10 @@ pub const DIR_RANDOM: &str = "random";
 pub const IDLE: &str = "待机呼吸休闲";
 pub const TURN: &str = "东张西望";
 pub const MOVES: [&str; 3] = ["螃蟹走路", "原地漂浮踏步", "原地左转奔跑"];
-pub const CLICKS: [&str; 3] = ["点击回应 - 开心跃动", "点击回应 - 害羞惊讶", "点击回应 - 傲娇生气（侧身展示）"];
+pub const CLICKS: [&str; 5] = ["点击回应-开心跃动", "点击回应-害羞惊讶", "点击回应-傲娇生气", "点击回应-挠痒咯咯笑", "点击回应-元气挥手"];
 pub const DRAG: &str = "被鼠标拖拽悬空反馈";
+/// 含中文文字的剪辑：朝左（镜像播放）时文字会颠倒，需排除。
+pub const TEXT_CLIPS: [&str; 2] = ["是啊，吃什么", "深度思考碎碎念"];
 
 /// 动态分类结果（对应上游 build_categories 返回）。
 pub struct Category {
@@ -316,30 +318,47 @@ pub fn pick(pool: &[String], exclude: Option<&str>) -> String {
     pool[idx].clone()
 }
 
+/// 从随机动作池选（排除当前项；朝左镜像时额外剔除带中文文字的剪辑）。
+fn pick_acts(cat: &Category, current: &str, facing_right: bool) -> String {
+    if facing_right || cat.acts.len() <= 1 {
+        return pick(&cat.acts, Some(current));
+    }
+    let pool: Vec<String> = cat
+        .acts
+        .iter()
+        .filter(|n| !TEXT_CLIPS.contains(&n.as_str()))
+        .cloned()
+        .collect();
+    if pool.is_empty() {
+        return pick(&cat.acts, Some(current));
+    }
+    pick(&pool, Some(current))
+}
+
 /// 动画链：30% 待机 / 10% 转向 / 40% 动作 / 20% 移动。
 /// no_move 时移动概率并入动作；待机/转向支持多视频。
-pub fn pick_next(cat: &Category, current: &str, no_move: bool, can_move: bool) -> String {
+pub fn pick_next(cat: &Category, current: &str, no_move: bool, can_move: bool, facing_right: bool) -> String {
     let roll = rand_f64();
     if roll < P_IDLE {
         if !cat.idles.is_empty() {
             return pick(&cat.idles, Some(current));
         }
-        return pick(&cat.acts, Some(current));
+        return pick_acts(cat, current, facing_right);
     }
     if roll < P_TURN {
         if !cat.turns.is_empty() {
             return pick(&cat.turns, Some(current));
         }
-        return pick(&cat.acts, Some(current));
+        return pick_acts(cat, current, facing_right);
     }
     if roll < P_ACTS {
-        return pick(&cat.acts, Some(current));
+        return pick_acts(cat, current, facing_right);
     }
     // 移动分支
     if !no_move && can_move && !cat.moves.is_empty() {
         return pick(&cat.moves, Some(current));
     }
-    pick(&cat.acts, Some(current))
+    pick_acts(cat, current, facing_right)
 }
 
 // ---- 简易随机（xorshift + 时间种子，零依赖）----

@@ -260,7 +260,7 @@ impl Pet {
             return;
         }
         let can_move = self.try_plan_move();
-        let next = state::pick_next(&self.cats, &name, self.no_move, can_move);
+        let next = state::pick_next(&self.cats, &name, self.no_move, can_move, self.facing_right);
         self.switch_anim(&next);
     }
 

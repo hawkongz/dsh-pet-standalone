@@ -1,17 +1,5 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-if errorlevel 1 (
-  echo [FAIL] vcvars64 failed
-  exit /b 1
-)
-cd /d C:\allsoftware\devs\ds-pet\vendor_libvpx
-echo [START] nmake
-nmake > build_nmake.log 2>&1
-if errorlevel 1 (
-  echo [FAIL] nmake failed
-  tail -40 build_nmake.log
-  exit /b 1
-)
-echo [OK] nmake done
-echo "=== LIB OUTPUT ==="
-dir *.lib 2>nul
+rem 已由 build_libvpx.cmd 取代（nmake 无法解析 libvpx 的 GNU make 语法 config.mk）。
+echo [SKIP] nmake 路线不适用于 libvpx（config.mk 为 GNU make 语法），
+echo        请改用 build_libvpx.cmd（configure + vcxproj + msbuild 一键流程）。
+exit /b 0
