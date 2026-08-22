@@ -22,8 +22,8 @@ impl ClipDecoder {
         // 实测：vendor libvpx (v1.14.1) 多线程 (row-mt job queue) 解码存在数据竞争，
         // 同一视频两次解码产生不同像素（运动边缘处随机冒出错误颜色）。
         // 固定 1 线程消除竞争（解码 640x360 单线程 ~5-10ms/帧，足够 24fps）。
-        let color_dec = vpx::Decoder::new(1)?;
-        let alpha_dec = webm.frames.iter().any(|f| f.alpha.is_some()).then(|| vpx::Decoder::new(1)).flatten();
+        let color_dec = vpx::Decoder::new(vpx::VPX_THREADS)?;
+        let alpha_dec = webm.frames.iter().any(|f| f.alpha.is_some()).then(|| vpx::Decoder::new(vpx::VPX_THREADS)).flatten();
         // 预计算 YUV->RGB 有限范围 BT.601 亮度系数
         let mut ytab = [0i32; 256];
         for i in 0..256usize {
@@ -40,15 +40,21 @@ impl ClipDecoder {
     }
 
     /// 跳到指定帧（重播时从 0 开始）。重建解码器以清空参考帧状态。
+    /// 注意：必须保持 1 线程——vendor libvpx 多线程（row-mt job queue）解码存在数据竞争，
+    /// 会在运动边缘随机冒出错误颜色（见 new() 注释）；此处重建也同样必须 1 线程。
     pub fn seek(&mut self, idx: usize) {
         if self.cur == idx {
             return;
         }
         self.cur = idx;
-        // 重建解码器（清空 VP9 参考帧）
-        self.color_dec = vpx::Decoder::new(4).unwrap_or_else(|| vpx::Decoder::new(2).unwrap());
+        // 重建解码器（清空 VP9 参考帧）；失败则保留原解码器继续播
+        if let Some(d) = vpx::Decoder::new(vpx::VPX_THREADS) {
+            self.color_dec = d;
+        }
         if self.alpha_dec.is_some() {
-            self.alpha_dec = Some(vpx::Decoder::new(2).unwrap());
+            if let Some(d) = vpx::Decoder::new(vpx::VPX_THREADS) {
+                self.alpha_dec = Some(d);
+            }
         }
     }
 

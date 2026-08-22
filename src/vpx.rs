@@ -68,6 +68,11 @@ pub const VPX_PLANE_U: usize = 1;
 pub const VPX_PLANE_V: usize = 2;
 pub const VPX_PLANE_ALPHA: usize = 3;
 
+/// 解码线程数：必须为 1。vendor libvpx (v1.14.1) 多线程（row-mt job queue）解码存在数据竞争，
+/// 同一视频两次解码会在运动边缘随机产生不同的错误颜色；1 线程消除该问题。
+/// 任何地方新建解码器都必须使用本常量（含 seek() 重建路径）。
+pub const VPX_THREADS: c_uint = 1;
+
 #[repr(C)]
 pub struct vpx_image_t {
     pub fmt: vpx_img_fmt_t,

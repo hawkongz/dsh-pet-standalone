@@ -47,15 +47,36 @@ fn main() {
     {
         let wm2 = webm::WebM::parse(data).unwrap();
         let f0 = &wm2.frames[0];
-        let mut vdec = vpx::Decoder::new(4).unwrap();
+        // 固定 1 线程：多线程 (row-mt) 解码存在数据竞争，会导致同帧两次解码像素不同。
+        let mut vdec = vpx::Decoder::new(vpx::VPX_THREADS).unwrap();
         let img = vdec.decode(&f0.video).unwrap();
         println!("image: w={} h={} d_w={} d_h={} fmt=0x{:x} bitdepth={} xcs={} ycs={} stride={:?}",
             img.w, img.h, img.d_w, img.d_h, img.fmt, img.bit_depth, img.x_chroma_shift, img.y_chroma_shift, img.stride);
         if let Some(a) = &f0.alpha {
-            let mut adec = vpx::Decoder::new(2).unwrap();
+            let mut adec = vpx::Decoder::new(vpx::VPX_THREADS).unwrap();
             let aimg = adec.decode(a).unwrap();
             println!("alpha image: w={} h={} d_w={} d_h={} fmt=0x{:x} stride={:?}",
                 aimg.w, aimg.h, aimg.d_w, aimg.d_h, aimg.fmt, aimg.stride);
+        }
+        // 回归断言：同帧用两个独立 1 线程解码器各解一次，亮度平面输出必须逐字节一致；
+        // 若有人把线程数调回多线程（row-mt 数据竞争）会在此处失败。
+        let luma_bytes = || -> Vec<u8> {
+            let mut dd = vpx::Decoder::new(vpx::VPX_THREADS).unwrap();
+            let img = dd.decode(&f0.video).unwrap();
+            let mut v = Vec::new();
+            let p = img.planes[vpx::VPX_PLANE_Y];
+            for y in 0..img.d_h as usize {
+                let row = unsafe { std::slice::from_raw_parts(p.add(y * img.stride[0] as usize), img.d_w as usize) };
+                v.extend_from_slice(row);
+            }
+            v
+        };
+        let b1 = luma_bytes();
+        let b2 = luma_bytes();
+        if b1 == b2 {
+            println!("解码确定性: 同帧两次解码逐字节一致 ({} B)", b1.len());
+        } else {
+            panic!("解码不确定性: 两帧输出不一致（发现多线程竞争？）");
         }
     }
 
