@@ -46,14 +46,19 @@ target/release/dsh-pet.exe
 
 ## 构建 libvpx 静态库（首次）
 
-需要：Visual Studio 2022（MSVC，含 C++ 工具链）、nasm（`winget install NASM.NASM`）、WSL（bash/wslpath/make/perl）。
+需要：Visual Studio 2022（MSVC，含 C++ 工具链）、nasm（`winget install NASM.NASM`，只用于 `float_control_word.asm`）、WSL（bash/wslpath/make/perl）。
 
 ```bat
 git clone --depth 1 --branch v1.14.1 https://github.com/webmproject/libvpx vendor_libvpx
-build_libvpx.cmd   rem 一键：configure（仅 VP9 解码器，640x360 上限）→ 生成 vpx.vcxproj → msbuild Release/x64
+build_libvpx.cmd   rem 一键：configure（纯 C 解码，640x360 上限）→ 生成 vpx.vcxproj → msbuild Release/x64
 ```
 
-产物：`vendor_libvpx/x64/Release/vpxmd.lib`（~7.6MB，链接后 dead-code 消除）。
+产物：`vendor_libvpx/x64/Release/vpxmd.lib`（~5.8MB，链接后 dead-code 消除）。
+
+> **为什么纯 C**：禁用全部 x86 SIMD（`--disable-mmx/sse/sse2/sse3/ssse3/sse4_1/avx/avx2/avx512`）。
+> 实测 libvpx v1.14.1 的 asm 解码路径在高运动边缘会**随机算错像素**（同一视频解两遍，
+> 146~232 帧有差异、单帧最多 2461 像素，对照 ffmpeg 为整块颜色错——黄绿 vs 粉红），
+> 这正是桌宠"时不时冒出其他颜色"的根因；纯 C 构建两次解码全部帧逐字节一致（见 decode_check）。
 
 ## 目录结构
 
